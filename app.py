@@ -57,6 +57,7 @@ def load_cloud_data():
         df['Kilometer'] = pd.to_numeric(df['Kilometer'], errors='coerce')
         df['Reg_Year'] = pd.to_numeric(df['Reg_Year'], errors='coerce')
         df['Age'] = pd.to_numeric(df['Age'], errors='coerce')
+        df['Price_Lakhs'] = df['Price_Raw'] / 100000  # Added for charts
     return df
 
 @st.cache_data
@@ -117,23 +118,16 @@ with st.sidebar:
     locations = ["All India"] + sorted(df['Location'].dropna().unique().tolist()) if not df.empty else ["All India"]
     selected_location = st.selectbox("State / Location", locations)
 
-    # ==========================================
-    # 🎯 THE RESTORED VARIANT MENU
-    # ==========================================
     raw_variants = []
-    
-    # Grab variants from CSV
     if not new_prices_df.empty and 'Variant' in new_prices_df.columns:
         csv_vars = new_prices_df[(new_prices_df['Make'] == selected_brand) & (new_prices_df['Model'] == selected_model)]['Variant'].dropna().astype(str).tolist()
         raw_variants.extend(csv_vars)
         
-    # Grab variants from Live Cloud Database
     if not df.empty:
         cloud_vars = df[(df['Make/Brand'] == selected_brand) & (df['Model'] == selected_model)]['Variant'].dropna().astype(str).tolist()
         raw_variants.extend(cloud_vars)
         
     if raw_variants:
-        # Remove duplicates and sort them
         variants = ["Any Variant"] + sorted(list(set(raw_variants)))
     else:
         variants = ["Any Variant"]
@@ -145,12 +139,25 @@ with st.sidebar:
     seller_asking = st.number_input("Seller's Asking Price (₹)", min_value=0, value=0, step=10000)
     target_margin = st.slider("Required Profit Margin (%)", min_value=5, max_value=30, value=15, step=1)
     
+    # ==========================================
+    # 🎯 NEW: PHYSICAL APPRAISAL CHECKLIST
+    # ==========================================
     st.markdown("---")
-    st.header("3. Asset Valuation")
-    known_new_price = st.number_input("Manual Override New Price (₹)", min_value=0, value=0, step=50000, help="Leave at 0 to use your Master CSV Database.")
+    st.header("3. Physical Appraisal")
+    st.caption("Adjust AI price based on lot inspection.")
+    
+    tyre_cond = st.selectbox("Tyre Condition", ["Good (0 deduction)", "Average (-₹15k)", "Needs Replacement (-₹30k)"])
+    paint_cond = st.selectbox("Exterior & Paint", ["Clean (0 deduction)", "Minor Scratches (-₹15k)", "Major Dents/Repaint (-₹40k)"])
+    mech_cond = st.selectbox("Mechanical & Engine", ["Smooth (0 deduction)", "Minor Issues/Suspension (-₹20k)", "Major Work Needed (-₹50k)"])
+    color_appeal = st.selectbox("Color Market Appeal", ["High/Neutral (White/Silver/Black)", "Low/Unpopular (e.g., Red) (-₹25k)"])
+    interior_cond = st.checkbox("Interior Needs Deep Clean/Repair (-₹10k)")
+
+    st.markdown("---")
+    st.header("4. Asset Valuation")
+    known_new_price = st.number_input("Manual Override New Price (₹)", min_value=0, value=0, step=50000, help="Leave at 0 to use Master CSV.")
 
 # ==========================================
-# --- FILTER LOGIC ---
+# --- FILTER & APPRAISAL LOGIC ---
 # ==========================================
 mask = (df['Make/Brand'] == selected_brand) & (df['Model'] == selected_model)
 if selected_year != "Any Year":
@@ -168,15 +175,35 @@ st.title(f"Deal Analyzer: {selected_brand} {selected_model}")
 if filtered_data.empty:
     st.warning("⚠️ No live market data found for this exact combination yet. Try broadening your filters.")
 else:
+    # 1. Base AI Logic
     avg_market_price = filtered_data['Price_Raw'].mean()
+    
+    # 2. Apply Physical Deductions
+    deductions = 0
+    if "Average" in tyre_cond: deductions += 15000
+    elif "Replacement" in tyre_cond: deductions += 30000
+    
+    if "Minor Scratches" in paint_cond: deductions += 15000
+    elif "Major Dents" in paint_cond: deductions += 40000
+    
+    if "Minor Issues" in mech_cond: deductions += 20000
+    elif "Major Work" in mech_cond: deductions += 50000
+    
+    if "Low/Unpopular" in color_appeal: deductions += 25000
+    
+    if interior_cond: deductions += 10000
+    
+    # 3. Final Appraised Value
+    appraised_market_price = max(0, avg_market_price - deductions)
+    
     avg_age = filtered_data['Age'].mean()
     avg_km = filtered_data['Kilometer'].mean()
     
     margin_multiplier = (100 - target_margin) / 100
-    target_buy_price = avg_market_price * margin_multiplier
+    target_buy_price = appraised_market_price * margin_multiplier
     
-    actual_profit = avg_market_price - seller_asking
-    profit_margin_pct = (actual_profit / avg_market_price) * 100 if avg_market_price > 0 else 0
+    actual_profit = appraised_market_price - seller_asking
+    profit_margin_pct = (actual_profit / appraised_market_price) * 100 if appraised_market_price > 0 else 0
 
     est_new_price = 0
     price_source = ""
@@ -203,7 +230,7 @@ else:
         est_new_price = avg_market_price * 1.5 
         price_source = "(Estimated)"
 
-    depreciation_percent = ((est_new_price - avg_market_price) / est_new_price) * 100 if est_new_price > 0 else 0
+    depreciation_percent = ((est_new_price - appraised_market_price) / est_new_price) * 100 if est_new_price > 0 else 0
 
     st.success(f"☁️ Cloud Sync Active: Benchmarking strictly against {len(filtered_data)} vehicles.")
 
@@ -220,9 +247,9 @@ else:
     with col2:
         st.markdown(f"""
         <div class="metric-box">
-            <p style="color:#94A3B8; margin-bottom:0px;">True Market Average</p>
-            <h3 style="color:#F8FAFC;">₹{avg_market_price/100000:,.2f} Lakhs</h3>
-            <p style="color:#94A3B8; font-size:12px;">Expected selling price</p>
+            <p style="color:#94A3B8; margin-bottom:0px;">Appraised Market Value</p>
+            <h3 style="color:#F8FAFC;">₹{appraised_market_price/100000:,.2f} Lakhs</h3>
+            <p style="color:#10B981; font-size:12px;">Base AI: ₹{avg_market_price/100000:,.2f}L | Deductions: -₹{deductions:,.0f}</p>
         </div>
         """, unsafe_allow_html=True)
     with col3:
