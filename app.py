@@ -56,11 +56,24 @@ def load_cloud_data():
         
     df = pd.DataFrame(all_data)
     if not df.empty:
-        df['Price_Raw'] = pd.to_numeric(df['Price_Raw'], errors='coerce')
-        df['Kilometer'] = pd.to_numeric(df['Kilometer'], errors='coerce')
-        df['Reg_Year'] = pd.to_numeric(df['Reg_Year'], errors='coerce')
-        df['Age'] = pd.to_numeric(df['Age'], errors='coerce')
-        df['Price_Lakhs'] = df['Price_Raw'] / 100000 
+        # Safely convert to numeric and create Price_Lakhs for the charts
+        if 'Price_Raw' in df.columns:
+            df['Price_Raw'] = pd.to_numeric(df['Price_Raw'], errors='coerce')
+            df['Price_Lakhs'] = df['Price_Raw'] / 100000 
+            
+        if 'Kilometer' in df.columns:
+            df['Kilometer'] = pd.to_numeric(df['Kilometer'], errors='coerce')
+            
+        if 'Reg_Year' in df.columns:
+            df['Reg_Year'] = pd.to_numeric(df['Reg_Year'], errors='coerce')
+            
+        # Safely create Age if it is missing from Supabase
+        if 'Age' not in df.columns and 'Reg_Year' in df.columns:
+            import datetime
+            df['Age'] = datetime.datetime.now().year - df['Reg_Year']
+        elif 'Age' in df.columns:
+            df['Age'] = pd.to_numeric(df['Age'], errors='coerce')
+            
     return df
 
 @st.cache_data
