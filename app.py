@@ -363,8 +363,14 @@ else:
             mime="text/csv"
         )
 
+   # Define the columns we want to show
+    desired_columns = ['Make/Brand', 'Model', 'Variant', 'Reg_Year', 'Kilometer', 'Location', 'Price_Lakhs', 'Source', 'Listing_URL']
+    
+    # Safely select ONLY the columns that actually exist in the database right now
+    display_columns = [col for col in desired_columns if col in filtered_data.columns]
+
     st.dataframe(
-        filtered_data[['Make/Brand', 'Model', 'Variant', 'Reg_Year', 'Kilometer', 'Location', 'Price_Lakhs', 'Source', 'Detail_URL']],
+        filtered_data[display_columns],
         use_container_width=True,
         hide_index=True
     )
