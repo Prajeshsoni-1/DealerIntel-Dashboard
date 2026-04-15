@@ -44,12 +44,15 @@ def load_cloud_data():
     offset = 0
     
     while True:
-        response = supabase.table('dealership_database').select("*").range(offset, offset + limit - 1).execute()
-        data = response.data
-        if not data: break  
-        all_data.extend(data)
-        if len(data) < limit: break  
-        offset += limit
+        try:
+            response = supabase.table('dealership_database').select("*").range(offset, offset + limit - 1).execute()
+            data = response.data
+            if not data: break  
+            all_data.extend(data)
+            if len(data) < limit: break  
+            offset += limit
+        except Exception:
+            break
         
     df = pd.DataFrame(all_data)
     if not df.empty:
@@ -57,14 +60,14 @@ def load_cloud_data():
         df['Kilometer'] = pd.to_numeric(df['Kilometer'], errors='coerce')
         df['Reg_Year'] = pd.to_numeric(df['Reg_Year'], errors='coerce')
         df['Age'] = pd.to_numeric(df['Age'], errors='coerce')
-        df['Price_Lakhs'] = df['Price_Raw'] / 100000  # Added for charts
+        df['Price_Lakhs'] = df['Price_Raw'] / 100000 
     return df
 
 @st.cache_data
-def load_new_prices():
-    if os.path.exists("new_car_prices.csv"):
+def load_master_catalog():
+    if os.path.exists("master_car_prices.csv"):
         try:
-            temp_df = pd.read_csv("new_car_prices.csv")
+            temp_df = pd.read_csv("master_car_prices.csv")
             temp_df.columns = temp_df.columns.str.strip() 
             return temp_df
         except Exception:
@@ -72,7 +75,7 @@ def load_new_prices():
     return pd.DataFrame()
 
 df = load_cloud_data()
-new_prices_df = load_new_prices()
+master_catalog_df = load_master_catalog()
 
 @st.cache_data
 def convert_df(df):
@@ -97,14 +100,26 @@ with st.sidebar:
             
     st.header("1. Market Filters")
 
-    if not new_prices_df.empty and 'Make' in new_prices_df.columns:
-        brands = sorted(new_prices_df['Make'].dropna().unique().tolist())
+    # NEW: Toggle for Discontinued Cars
+    show_discontinued = st.checkbox("Include Discontinued Models", value=True, help="Check this to include older legacy cars in the dropdowns.")
+    
+    # Filter the Master Catalog based on user toggle
+    if not master_catalog_df.empty:
+        if not show_discontinued and 'Market_Status' in master_catalog_df.columns:
+            active_catalog = master_catalog_df[master_catalog_df['Market_Status'] == 'Active']
+        else:
+            active_catalog = master_catalog_df
+    else:
+        active_catalog = pd.DataFrame()
+
+    if not active_catalog.empty and 'Make' in active_catalog.columns:
+        brands = sorted(active_catalog['Make'].dropna().unique().tolist())
     else:
         brands = sorted(df['Make/Brand'].dropna().unique().tolist()) if not df.empty else ["No Data"]
     selected_brand = st.selectbox("Make/Brand", brands)
 
-    if not new_prices_df.empty and 'Model' in new_prices_df.columns:
-        models = sorted(new_prices_df[new_prices_df['Make'] == selected_brand]['Model'].dropna().unique().tolist())
+    if not active_catalog.empty and 'Model' in active_catalog.columns:
+        models = sorted(active_catalog[active_catalog['Make'] == selected_brand]['Model'].dropna().unique().tolist())
     else:
         models = sorted(df[df['Make/Brand'] == selected_brand]['Model'].dropna().unique().tolist()) if not df.empty else ["No Data"]
     selected_model = st.selectbox("Model", models)
@@ -119,8 +134,8 @@ with st.sidebar:
     selected_location = st.selectbox("State / Location", locations)
 
     raw_variants = []
-    if not new_prices_df.empty and 'Variant' in new_prices_df.columns:
-        csv_vars = new_prices_df[(new_prices_df['Make'] == selected_brand) & (new_prices_df['Model'] == selected_model)]['Variant'].dropna().astype(str).tolist()
+    if not active_catalog.empty and 'Variant' in active_catalog.columns:
+        csv_vars = active_catalog[(active_catalog['Make'] == selected_brand) & (active_catalog['Model'] == selected_model)]['Variant'].dropna().astype(str).tolist()
         raw_variants.extend(csv_vars)
         
     if not df.empty:
@@ -139,9 +154,6 @@ with st.sidebar:
     seller_asking = st.number_input("Seller's Asking Price (₹)", min_value=0, value=0, step=10000)
     target_margin = st.slider("Required Profit Margin (%)", min_value=5, max_value=30, value=15, step=1)
     
-    # ==========================================
-    # 🎯 NEW: PHYSICAL APPRAISAL CHECKLIST
-    # ==========================================
     st.markdown("---")
     st.header("3. Physical Appraisal")
     st.caption("Adjust AI price based on lot inspection.")
@@ -159,21 +171,24 @@ with st.sidebar:
 # ==========================================
 # --- FILTER & APPRAISAL LOGIC ---
 # ==========================================
-mask = (df['Make/Brand'] == selected_brand) & (df['Model'] == selected_model)
-if selected_year != "Any Year":
-    mask = mask & (df['Reg_Year'] == int(selected_year)) 
-if selected_location != "All India":
-    mask = mask & (df['Location'] == selected_location)
-if selected_variant != "Any Variant":
-    mask = mask & (df['Variant'] == selected_variant)
+mask = pd.Series([True] * len(df)) if not df.empty else pd.Series(dtype=bool)
 
-filtered_data = df[mask]
+if not df.empty:
+    mask = (df['Make/Brand'] == selected_brand) & (df['Model'] == selected_model)
+    if selected_year != "Any Year":
+        mask = mask & (df['Reg_Year'] == int(selected_year)) 
+    if selected_location != "All India":
+        mask = mask & (df['Location'] == selected_location)
+    if selected_variant != "Any Variant":
+        mask = mask & (df['Variant'] == selected_variant)
+
+filtered_data = df[mask] if not df.empty else pd.DataFrame()
 
 # --- DASHBOARD UI ---
 st.title(f"Deal Analyzer: {selected_brand} {selected_model}")
 
 if filtered_data.empty:
-    st.warning("⚠️ No live market data found for this exact combination yet. Try broadening your filters.")
+    st.warning("⚠️ No live market data found for this exact combination yet in Supabase. The AI pricing model requires scraped market data to generate a baseline.")
 else:
     # 1. Base AI Logic
     avg_market_price = filtered_data['Price_Raw'].mean()
@@ -211,24 +226,25 @@ else:
     if known_new_price > 0:
         est_new_price = known_new_price
         price_source = "(Manual Input)"
-    elif not new_prices_df.empty and 'Make' in new_prices_df.columns and 'Ex_Showroom_Price' in new_prices_df.columns:
-        if selected_variant != "Any Variant" and 'Variant' in new_prices_df.columns:
-            exact_match = new_prices_df[(new_prices_df['Make'] == selected_brand) & 
-                                        (new_prices_df['Model'] == selected_model) & 
-                                        (new_prices_df['Variant'] == selected_variant)]
-            if not exact_match.empty:
+    elif not active_catalog.empty and 'Make' in active_catalog.columns and 'Ex_Showroom_Price' in active_catalog.columns:
+        if selected_variant != "Any Variant" and 'Variant' in active_catalog.columns:
+            exact_match = active_catalog[(active_catalog['Make'] == selected_brand) & 
+                                         (active_catalog['Model'] == selected_model) & 
+                                         (active_catalog['Variant'] == selected_variant)]
+            if not exact_match.empty and exact_match['Ex_Showroom_Price'].values[0] > 0:
                 est_new_price = exact_match['Ex_Showroom_Price'].values[0]
-                price_source = f"(Exact Variant: {selected_variant})"
+                price_source = f"(Exact Master Catalog)"
         
         if est_new_price == 0:
-            avg_match = new_prices_df[(new_prices_df['Make'] == selected_brand) & (new_prices_df['Model'] == selected_model)]
-            if not avg_match.empty:
-                est_new_price = avg_match['Ex_Showroom_Price'].mean()
-                price_source = "(Model Average)"
+            avg_match = active_catalog[(active_catalog['Make'] == selected_brand) & (active_catalog['Model'] == selected_model)]
+            valid_prices = avg_match[avg_match['Ex_Showroom_Price'] > 0]
+            if not valid_prices.empty:
+                est_new_price = valid_prices['Ex_Showroom_Price'].mean()
+                price_source = "(Catalog Average)"
             
     if est_new_price == 0:
         est_new_price = avg_market_price * 1.5 
-        price_source = "(Estimated)"
+        price_source = "(AI Estimated - Discontinued/Missing)"
 
     depreciation_percent = ((est_new_price - appraised_market_price) / est_new_price) * 100 if est_new_price > 0 else 0
 
@@ -335,7 +351,7 @@ else:
         )
 
     st.dataframe(
-        filtered_data[['Make/Brand', 'Model', 'Variant', 'Reg_Year', 'Kilometer', 'Location', 'Price_Lakhs', 'Source', 'Listing_URL']],
+        filtered_data[['Make/Brand', 'Model', 'Variant', 'Reg_Year', 'Kilometer', 'Location', 'Price_Lakhs', 'Source', 'Detail_URL']],
         use_container_width=True,
         hide_index=True
     )
