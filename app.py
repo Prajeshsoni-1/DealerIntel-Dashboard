@@ -3,6 +3,7 @@ import pandas as pd
 from supabase import create_client
 import plotly.express as px
 import os
+import datetime
 
 # --- PAGE SETUP & UI THEME ---
 st.set_page_config(page_title="DealerIntel Pro | Procurement", page_icon="🏎️", layout="wide")
@@ -42,6 +43,7 @@ def load_cloud_data():
     all_data = []
     limit = 1000
     offset = 0
+    current_year = datetime.datetime.now().year
     
     while True:
         try:
@@ -56,24 +58,17 @@ def load_cloud_data():
         
     df = pd.DataFrame(all_data)
     if not df.empty:
-        # Safely convert to numeric and create Price_Lakhs for the charts
         if 'Price_Raw' in df.columns:
             df['Price_Raw'] = pd.to_numeric(df['Price_Raw'], errors='coerce')
             df['Price_Lakhs'] = df['Price_Raw'] / 100000 
-            
         if 'Kilometer' in df.columns:
             df['Kilometer'] = pd.to_numeric(df['Kilometer'], errors='coerce')
-            
         if 'Reg_Year' in df.columns:
             df['Reg_Year'] = pd.to_numeric(df['Reg_Year'], errors='coerce')
-            
-        # Safely create Age if it is missing from Supabase
         if 'Age' not in df.columns and 'Reg_Year' in df.columns:
-            import datetime
-            df['Age'] = datetime.datetime.now().year - df['Reg_Year']
+            df['Age'] = current_year - df['Reg_Year']
         elif 'Age' in df.columns:
             df['Age'] = pd.to_numeric(df['Age'], errors='coerce')
-            
     return df
 
 @st.cache_data
@@ -113,10 +108,8 @@ with st.sidebar:
             
     st.header("1. Market Filters")
 
-    # NEW: Toggle for Discontinued Cars
-    show_discontinued = st.checkbox("Include Discontinued Models", value=True, help="Check this to include older legacy cars in the dropdowns.")
+    show_discontinued = st.checkbox("Include Discontinued Models", value=True)
     
-    # Filter the Master Catalog based on user toggle
     if not master_catalog_df.empty:
         if not show_discontinued and 'Market_Status' in master_catalog_df.columns:
             active_catalog = master_catalog_df[master_catalog_df['Market_Status'] == 'Active']
@@ -137,11 +130,11 @@ with st.sidebar:
         models = sorted(df[df['Make/Brand'] == selected_brand]['Model'].dropna().unique().tolist()) if not df.empty else ["No Data"]
     selected_model = st.selectbox("Model", models)
 
-    if not df.empty:
-        years = ["Any Year"] + sorted(df[(df['Make/Brand'] == selected_brand) & (df['Model'] == selected_model)]['Reg_Year'].dropna().astype(int).unique().tolist(), reverse=True)
-    else:
-        years = ["Any Year"]
-    selected_year = st.selectbox("Registration Year", years)
+    # Synthetic Engine needs a specific year to calculate depreciation
+    # We offer the last 15 years as options
+    current_year = datetime.datetime.now().year
+    all_years = ["Any Year"] + list(range(current_year, current_year - 15, -1))
+    selected_year = st.selectbox("Registration Year", all_years)
 
     locations = ["All India"] + sorted(df['Location'].dropna().unique().tolist()) if not df.empty else ["All India"]
     selected_location = st.selectbox("State / Location", locations)
@@ -179,10 +172,10 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("4. Asset Valuation")
-    known_new_price = st.number_input("Manual Override New Price (₹)", min_value=0, value=0, step=50000, help="Leave at 0 to use Master CSV.")
+    known_new_price = st.number_input("Manual Override New Price (₹)", min_value=0, value=0, step=50000)
 
 # ==========================================
-# --- FILTER & APPRAISAL LOGIC ---
+# --- CORE LOGIC: LIVE DB vs SYNTHETIC ENGINE ---
 # ==========================================
 mask = pd.Series([True] * len(df)) if not df.empty else pd.Series(dtype=bool)
 
@@ -197,16 +190,75 @@ if not df.empty:
 
 filtered_data = df[mask] if not df.empty else pd.DataFrame()
 
+# 1. Determine the Ex-Showroom Price FIRST (We need this for synthetic math)
+est_new_price = 0
+price_source = ""
+
+if known_new_price > 0:
+    est_new_price = known_new_price
+    price_source = "(Manual Input)"
+elif not active_catalog.empty and 'Make' in active_catalog.columns and 'Ex_Showroom_Price' in active_catalog.columns:
+    if selected_variant != "Any Variant":
+        exact_match = active_catalog[(active_catalog['Make'] == selected_brand) & 
+                                     (active_catalog['Model'] == selected_model) & 
+                                     (active_catalog['Variant'] == selected_variant)]
+        if not exact_match.empty and exact_match['Ex_Showroom_Price'].values[0] > 0:
+            est_new_price = exact_match['Ex_Showroom_Price'].values[0]
+            price_source = f"(Exact Master Catalog)"
+    
+    if est_new_price == 0:
+        avg_match = active_catalog[(active_catalog['Make'] == selected_brand) & (active_catalog['Model'] == selected_model)]
+        valid_prices = avg_match[avg_match['Ex_Showroom_Price'] > 0]
+        if not valid_prices.empty:
+            est_new_price = valid_prices['Ex_Showroom_Price'].mean()
+            price_source = "(Catalog Average)"
+
+# 2. Determine Base AI Price (Live Scraped vs Ideal Depreciation)
+is_synthetic = False
+avg_market_price = 0
+avg_age = 0
+avg_km = 0
+depreciation_percent = 0
+
+if not filtered_data.empty:
+    # We have live data! Use the real market average.
+    avg_market_price = filtered_data['Price_Raw'].mean()
+    avg_age = filtered_data['Age'].mean()
+    avg_km = filtered_data['Kilometer'].mean()
+    if est_new_price == 0:
+        est_new_price = avg_market_price * 1.5 
+        price_source = "(AI Estimated - Missing)"
+    depreciation_percent = ((est_new_price - avg_market_price) / est_new_price) * 100 if est_new_price > 0 else 0
+
+else:
+    # SYNTHETIC MODE! We don't have scraped data, so calculate mathematically.
+    is_synthetic = True
+    if est_new_price > 0 and selected_year != "Any Year":
+        avg_age = current_year - int(selected_year)
+        avg_age = max(0, avg_age) # Prevent negative age
+        
+        # Standard Depreciation Curve Logic
+        # Y1: 20%, Y2: 30%, Y3: 40%, Y4: 50%, Y5: 60%
+        depreciation_rate = min(0.20 + (avg_age * 0.10), 0.85)
+        avg_market_price = est_new_price * (1 - depreciation_rate)
+        
+        avg_km = avg_age * 12000 # Assume average Indian driver does 12,000km/year
+        depreciation_percent = depreciation_rate * 100
+        
+
 # --- DASHBOARD UI ---
 st.title(f"Deal Analyzer: {selected_brand} {selected_model}")
 
-if filtered_data.empty:
-    st.warning("⚠️ No live market data found for this exact combination yet in Supabase. The AI pricing model requires scraped market data to generate a baseline.")
+if avg_market_price == 0:
+    # Failsafe: No cloud data AND user didn't give us a year/price to do the math.
+    st.error("⚠️ **No Data Found.** To calculate an Ideal Depreciation Price, please select a specific **Registration Year** from the sidebar, and ensure the Variant is selected or use the Manual Override New Price.")
 else:
-    # 1. Base AI Logic
-    avg_market_price = filtered_data['Price_Raw'].mean()
-    
-    # 2. Apply Physical Deductions
+    if is_synthetic:
+        st.warning(f"⚠️ **Synthetic Engine Active:** No live market data found in Supabase. Using the Mathematical Depreciation Model (-{int(depreciation_percent)}%) based on the New Car Price.")
+    else:
+        st.success(f"☁️ **Cloud Sync Active:** Benchmarking strictly against {len(filtered_data)} vehicles currently on the market.")
+
+    # 3. Apply Physical Deductions to the Base Price (Live or Synthetic)
     deductions = 0
     if "Average" in tyre_cond: deductions += 15000
     elif "Replacement" in tyre_cond: deductions += 30000
@@ -221,47 +273,14 @@ else:
     
     if interior_cond: deductions += 10000
     
-    # 3. Final Appraised Value
+    # 4. Final Appraised Value
     appraised_market_price = max(0, avg_market_price - deductions)
-    
-    avg_age = filtered_data['Age'].mean()
-    avg_km = filtered_data['Kilometer'].mean()
     
     margin_multiplier = (100 - target_margin) / 100
     target_buy_price = appraised_market_price * margin_multiplier
     
     actual_profit = appraised_market_price - seller_asking
     profit_margin_pct = (actual_profit / appraised_market_price) * 100 if appraised_market_price > 0 else 0
-
-    est_new_price = 0
-    price_source = ""
-    
-    if known_new_price > 0:
-        est_new_price = known_new_price
-        price_source = "(Manual Input)"
-    elif not active_catalog.empty and 'Make' in active_catalog.columns and 'Ex_Showroom_Price' in active_catalog.columns:
-        if selected_variant != "Any Variant" and 'Variant' in active_catalog.columns:
-            exact_match = active_catalog[(active_catalog['Make'] == selected_brand) & 
-                                         (active_catalog['Model'] == selected_model) & 
-                                         (active_catalog['Variant'] == selected_variant)]
-            if not exact_match.empty and exact_match['Ex_Showroom_Price'].values[0] > 0:
-                est_new_price = exact_match['Ex_Showroom_Price'].values[0]
-                price_source = f"(Exact Master Catalog)"
-        
-        if est_new_price == 0:
-            avg_match = active_catalog[(active_catalog['Make'] == selected_brand) & (active_catalog['Model'] == selected_model)]
-            valid_prices = avg_match[avg_match['Ex_Showroom_Price'] > 0]
-            if not valid_prices.empty:
-                est_new_price = valid_prices['Ex_Showroom_Price'].mean()
-                price_source = "(Catalog Average)"
-            
-    if est_new_price == 0:
-        est_new_price = avg_market_price * 1.5 
-        price_source = "(AI Estimated - Discontinued/Missing)"
-
-    depreciation_percent = ((est_new_price - appraised_market_price) / est_new_price) * 100 if est_new_price > 0 else 0
-
-    st.success(f"☁️ Cloud Sync Active: Benchmarking strictly against {len(filtered_data)} vehicles.")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -326,51 +345,50 @@ else:
     with vcol2:
         st.markdown(f"<div class='value-box'><p style='color:#94A3B8; margin:0;'>Total Market Depreciation</p><h4 style='color:#EF4444;'>↓ {depreciation_percent:.1f}%</h4></div>", unsafe_allow_html=True)
     with vcol3:
-        st.markdown(f"<div class='value-box'><p style='color:#94A3B8; margin:0;'>Average Market Age</p><h4>{avg_age:.1f} Years</h4></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='value-box'><p style='color:#94A3B8; margin:0;'>Estimated Age</p><h4>{avg_age:.1f} Years</h4></div>", unsafe_allow_html=True)
     with vcol4:
-        st.markdown(f"<div class='value-box'><p style='color:#94A3B8; margin:0;'>Average Odometer</p><h4>{avg_km:,.0f} km</h4></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='value-box'><p style='color:#94A3B8; margin:0;'>Estimated Odometer</p><h4>{avg_km:,.0f} km</h4></div>", unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.subheader("📊 Market Proof (Negotiation Tools)")
-    chart_col1, chart_col2 = st.columns(2)
+    # Only show the charts and table if we have REAL live data
+    if not is_synthetic:
+        st.markdown("---")
+        st.subheader("📊 Market Proof (Negotiation Tools)")
+        chart_col1, chart_col2 = st.columns(2)
 
-    with chart_col1:
-        fig1 = px.histogram(filtered_data, x="Price_Lakhs", nbins=15, 
-                            title="Where other sellers are pricing this car",
-                            color_discrete_sequence=['#3B82F6'])
-        if seller_asking > 0:
-            fig1.add_vline(x=seller_asking/100000, line_dash="dash", line_color="red", annotation_text="Seller's Price")
-        fig1.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font_color="white")
-        st.plotly_chart(fig1, use_container_width=True)
+        with chart_col1:
+            fig1 = px.histogram(filtered_data, x="Price_Lakhs", nbins=15, 
+                                title="Where other sellers are pricing this car",
+                                color_discrete_sequence=['#3B82F6'])
+            if seller_asking > 0:
+                fig1.add_vline(x=seller_asking/100000, line_dash="dash", line_color="red", annotation_text="Seller's Price")
+            fig1.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font_color="white")
+            st.plotly_chart(fig1, use_container_width=True)
 
-    with chart_col2:
-        fig2 = px.scatter(filtered_data, x="Kilometer", y="Price_Lakhs", 
-                          color="Reg_Year", hover_data=["Variant", "Location"],
-                          title="Mileage vs. Market Price",
-                          color_continuous_scale=px.colors.sequential.Plasma)
-        fig2.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font_color="white")
-        st.plotly_chart(fig2, use_container_width=True)
+        with chart_col2:
+            fig2 = px.scatter(filtered_data, x="Kilometer", y="Price_Lakhs", 
+                              color="Reg_Year", hover_data=["Variant", "Location"],
+                              title="Mileage vs. Market Price",
+                              color_continuous_scale=px.colors.sequential.Plasma)
+            fig2.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", font_color="white")
+            st.plotly_chart(fig2, use_container_width=True)
 
-    colA, colB = st.columns([0.8, 0.2])
-    with colA:
-        st.subheader("🚗 Live Market Inventory")
-    with colB:
-        csv_data = convert_df(filtered_data)
-        st.download_button(
-            label="📥 Download as Excel/CSV",
-            data=csv_data,
-            file_name=f"{selected_brand}_{selected_model}_{selected_variant}_Data.csv",
-            mime="text/csv"
+        colA, colB = st.columns([0.8, 0.2])
+        with colA:
+            st.subheader("🚗 Live Market Inventory")
+        with colB:
+            csv_data = convert_df(filtered_data)
+            st.download_button(
+                label="📥 Download as Excel/CSV",
+                data=csv_data,
+                file_name=f"{selected_brand}_{selected_model}_{selected_variant}_Data.csv",
+                mime="text/csv"
+            )
+
+        desired_columns = ['Make/Brand', 'Model', 'Variant', 'Reg_Year', 'Kilometer', 'Location', 'Price_Lakhs', 'Source', 'Listing_URL']
+        display_columns = [col for col in desired_columns if col in filtered_data.columns]
+        
+        st.dataframe(
+            filtered_data[display_columns],
+            use_container_width=True,
+            hide_index=True
         )
-
-   # Define the columns we want to show
-    desired_columns = ['Make/Brand', 'Model', 'Variant', 'Reg_Year', 'Kilometer', 'Location', 'Price_Lakhs', 'Source', 'Listing_URL']
-    
-    # Safely select ONLY the columns that actually exist in the database right now
-    display_columns = [col for col in desired_columns if col in filtered_data.columns]
-
-    st.dataframe(
-        filtered_data[display_columns],
-        use_container_width=True,
-        hide_index=True
-    )
