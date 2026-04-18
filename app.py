@@ -3,51 +3,14 @@ import re
 
 import pandas as pd
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 CURRENT_YEAR = datetime.datetime.now().year
 LOCAL_MARKET_FILE = "master_market_data.csv.csv"
 LOCAL_STOCK_FILE = "combined_inventory.csv"
 MASTER_CATALOG_FILE = "master_car_prices.csv"
 
-
 def safe_numeric(series):
 @@ -55,6 +21,50 @@ def first_existing_column(df, candidates):
     return None
-
 
 def normalize_text(value):
     if pd.isna(value):
@@ -55,7 +18,6 @@ def normalize_text(value):
     value = str(value).strip().lower()
     value = re.sub(r"[^a-z0-9]+", " ", value)
     return re.sub(r"\s+", " ", value).strip()
-
 
 def parse_owner_rank(value):
     text = normalize_text(value)
@@ -71,7 +33,6 @@ def parse_owner_rank(value):
         return 4
     match = re.search(r"(\d+)", text)
     return int(match.group(1)) if match else pd.NA
-
 
 def parse_listing_days(value):
     text = normalize_text(value)
@@ -91,7 +52,6 @@ def parse_listing_days(value):
             parsed = parsed.replace(year=CURRENT_YEAR)
             return max((pd.Timestamp.today().normalize() - parsed).days, 0)
     return pd.NA
-
 
 def normalize_inventory_schema(df):
     if df.empty:
@@ -143,7 +103,6 @@ def normalize_inventory_schema(df):
         df["Kilometer"] = safe_numeric(df["Kilometer"])
         df.loc[df["Kilometer"] <= 0, "Kilometer"] = pd.NA
 
-
     else:
         df["Kilometer"] = pd.Series(dtype="float64")
 
@@ -161,7 +120,6 @@ def normalize_inventory_schema(df):
     df["Price_Lakhs"] = df["Price_Raw"] / 100000
     df = df.dropna(subset=["Make/Brand", "Model", "Price_Raw"], how="any")
     return df
-
 
 @@ -140,7 +163,7 @@ def normalize_catalog_schema(df):
     df = df.copy()
@@ -182,59 +140,7 @@ def normalize_inventory_schema(df):
     df["Transmission_Key"] = df["Transmission"].apply(normalize_text)
     return df
 
-
 def load_csv_dataset(path, normalizer):
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     try:
         return normalizer(pd.read_csv(path)), ""
@@ -248,64 +154,12 @@ def get_catalog_price(active_catalog, brand, model, variant, fuel_type, transmis
     if manual_price > 0:
         return manual_price, "Manual Input", "Unknown"
 
-
-
-
-
-
     if active_catalog.empty:
         return 0, "", "Unknown"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     pool = active_catalog[
         (active_catalog["Make_Key"] == normalize_text(brand))
         & (active_catalog["Model_Key"] == normalize_text(model))
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     ].copy()
 
@@ -336,7 +190,6 @@ def get_catalog_price(active_catalog, brand, model, variant, fuel_type, transmis
     status_mode = pool["Market_Status"].mode()
     market_status = status_mode.iloc[0] if not status_mode.empty else "Unknown"
     return float(valid.mean()), "Catalog Average", market_status
-
 
 def build_comparable_pool(market_df, brand, model, variant, year, location, fuel_type, transmission, owner_count, current_km):
     if market_df.empty:
@@ -436,8 +289,6 @@ def compute_confidence_score(exact_comps, strong_comps, km_coverage, owner_cover
         return score, "Medium"
     return score, "Low"
 
-
-
 def compute_demand_score(base_pool, comparable_pool):
     if base_pool.empty:
         return 0, "Unknown", "No market depth available."
@@ -446,40 +297,9 @@ def compute_demand_score(base_pool, comparable_pool):
     source_count = comparable_pool["Source"].nunique() if "Source" in comparable_pool.columns else 1
     median_days = comparable_pool["Listing_Days"].dropna().median() if "Listing_Days" in comparable_pool.columns else pd.NA
 
-
-
-
-
-
-
-
-
-
     score = 50
     score += max(0, 4 - supply_count) * 7
     score += min(source_count, 4) * 3
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     if pd.notna(median_days):
         if median_days <= 7:
@@ -501,14 +321,6 @@ def compute_demand_score(base_pool, comparable_pool):
     if score >= 45:
         return score, "Balanced", "The car has tradable demand, but pricing discipline still matters."
     return score, "Slow Demand", "Supply looks heavy or listings appear to move slowly."
-
-
-
-
-
-
-
-
 
 def compute_internal_stock_signal(stock_df, brand, model, variant, fuel_type, transmission):
     if stock_df.empty:
@@ -565,7 +377,6 @@ def get_deductions(tyre_cond, paint_cond, mech_cond, color_appeal, interior_cond
         deductions += 20000
     return deductions
 
-
 def compute_synthetic_market_price(est_new_price, year, current_km, market_status, brand):
     if est_new_price <= 0 or year == "Any Year":
         return 0.0, 0.0, 0.0, "Segment-Aware Synthetic Model"
@@ -582,192 +393,9 @@ def compute_synthetic_market_price(est_new_price, year, current_km, market_statu
     if km_reference > age * 12000 and age > 0:
         depreciation += min(((km_reference - age * 12000) / 10000) * 0.01, 0.06)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     depreciation = min(max(depreciation, 0.20), 0.82)
     price = est_new_price * (1 - depreciation)
     return float(price), float(age), float(km_reference), "Segment-Aware Synthetic Model"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def compute_market_valuation(comparable_pool, weighted_pool, est_new_price, year, current_km, market_status, brand):
     valuation = {
@@ -786,47 +414,6 @@ def compute_market_valuation(comparable_pool, weighted_pool, est_new_price, year
         "pricing_scope": "Synthetic",
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     if not comparable_pool.empty:
         weighted_price = ((comparable_pool["Price_Raw"] * comparable_pool["comp_weight"]).sum() / comparable_pool["comp_weight"].sum())
         median_price = comparable_pool["Price_Raw"].median()
@@ -840,33 +427,6 @@ def compute_market_valuation(comparable_pool, weighted_pool, est_new_price, year
         valuation["price_method"] = "Strict Comparable Pricing"
         valuation["pricing_scope"] = comparable_pool["pricing_scope"].iloc[0]
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         score, label = compute_confidence_score(
             valuation["exact_comps_used"],
             len(weighted_pool),
@@ -874,11 +434,6 @@ def compute_market_valuation(comparable_pool, weighted_pool, est_new_price, year
             comparable_pool["Owner_Rank"].notna().mean(),
             comparable_pool["Source"].nunique() if "Source" in comparable_pool.columns else 1,
             False,
-
-
-
-
-
         )
         valuation["confidence_score"] = score
         valuation["confidence_label"] = label
@@ -888,59 +443,6 @@ def compute_market_valuation(comparable_pool, weighted_pool, est_new_price, year
         if est_new_price > 0:
             valuation["depreciation_percent"] = max(0.0, ((est_new_price - valuation["retail_market_price"]) / est_new_price) * 100)
         return valuation, est_new_price
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     valuation["is_synthetic"] = True
     valuation["confidence_score"] = 20
@@ -955,7 +457,6 @@ def compute_market_valuation(comparable_pool, weighted_pool, est_new_price, year
     if est_new_price > 0 and price > 0:
         valuation["depreciation_percent"] = max(0.0, ((est_new_price - price) / est_new_price) * 100)
     return valuation, est_new_price
-
 
 def compute_procurement_metrics(retail_market_price, deductions, target_margin, demand_score, exact_stock_count, owner_count):
     risk_buffer = 15000
